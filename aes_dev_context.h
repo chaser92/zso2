@@ -17,6 +17,7 @@ struct aes_dev_context {
 	char block[16];
 	char key[16];
 	char iv[16];
+	char kbuf[4096];
 };
 
 #endif

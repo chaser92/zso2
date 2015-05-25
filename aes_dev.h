@@ -3,6 +3,7 @@
 
 #include <linux/pci.h>
 #include <linux/cdev.h>
+#include <linux/semaphore.h>
 
 struct aes_dev {
 	struct list_head list;
@@ -11,6 +12,7 @@ struct aes_dev {
 	dev_t devno;
 	struct cdev cdev;
 	struct device *dev;
+	struct semaphore mutex;
 };
 
 #endif

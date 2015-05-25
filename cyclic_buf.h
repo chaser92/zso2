@@ -13,9 +13,10 @@ struct cyclic_buf {
 
 int cbuf_init(struct cyclic_buf* cb, int length);
 void cbuf_destroy(struct cyclic_buf* cb);
+int cbuf_has_space(struct cyclic_buf* cb, int space);
 int cbuf_read_nonblock(struct cyclic_buf* cb, void* buf, int length);
-int cbuf_write_nonblock(struct cyclic_buf* cb, void* buf, int length);
+int cbuf_wait_for_write(struct cyclic_buf* cb);
 int cbuf_read(struct cyclic_buf* cb, void* buf, int length);
-int cbuf_write(struct cyclic_buf* cb, void* buf, int length);
+int cbuf_write_nonblock(struct cyclic_buf* cb, void* buf, int length);
 
 #endif

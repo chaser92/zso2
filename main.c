@@ -46,6 +46,7 @@ int aes_major =   AES_MAJOR;
 int aes_minor =   0;
 int aes_nr_devs = 0;	/* number of bare aes devices */
 
+
 //module_param(aes_major, int, S_IRUGO);
 //module_param(aes_minor, int, S_IRUGO);
 //module_param(aes_nr_devs, int, S_IRUGO);
@@ -75,7 +76,7 @@ int aes_open(struct inode *inode, struct file *filp)
 	if ((err = cbuf_init(&ctx->buf, 4096))) {
 		return err;
 	}
-		printk(KERN_NOTICE "Opening %d\n", ctx->buf.buf);
+
     dev = container_of(inode->i_cdev, struct aes_dev, cdev);
 	ctx->dev = dev;
 	filp->private_data = ctx;
@@ -93,14 +94,18 @@ int aes_release(struct inode *inode, struct file *filp)
 ssize_t aes_read(struct file *filp, char __user *buf, size_t count,
                 loff_t *f_pos)
 {
+	int nonblock = filp->f_flags & O_NONBLOCK;
 	int read;
-	char kbuf[4096];
 	struct aes_dev_context* ctx = filp->private_data;
-	
+	char* kbuf = ctx->kbuf;
 	if (ctx->mode == MODE_NOT_SET) {
 		return -EINVAL;
 	}
-	read = cbuf_read(&ctx->buf, kbuf, count > 4096 ? 4096 : count);
+	if (nonblock) {
+		read = cbuf_read_nonblock(&ctx->buf, kbuf, count > 4096 ? 4096 : count);
+	} else {
+		read = cbuf_read(&ctx->buf, kbuf, count > 4096 ? 4096 : count);	
+	}
 	if (read <= 0) {
 		return read;
 	}
@@ -113,10 +118,11 @@ ssize_t aes_read(struct file *filp, char __user *buf, size_t count,
 ssize_t aes_write(struct file *filp, const char __user *buf, size_t count,
                 loff_t *f_pos)
 {
+	int nonblock = filp->f_flags & O_NONBLOCK;
 	int written = 0;
-	char kbuf_arr[4096];
-	char* kbuf = kbuf_arr;
+	int lock_err;
 	struct aes_dev_context* ctx = filp->private_data;
+	char* kbuf = ctx->kbuf;
 
 	if (ctx->mode == MODE_NOT_SET) {
 		return -EINVAL;
@@ -130,29 +136,41 @@ ssize_t aes_write(struct file *filp, const char __user *buf, size_t count,
 	written = count > 16 - ctx->block_used ? 16 - ctx->block_used : count;
 	memcpy(ctx->block + ctx->block_used, kbuf, written);
 	ctx->block_used += written;
-	if (ctx->block_used == 16) {
-		pci_aes_set_key(ctx->dev, ctx->key);
-		pci_aes_set_meta(ctx->dev, ctx->iv);
-		pci_aes_next_block(ctx, ctx->block, 0);
-		kbuf += written;
-		count -= written;
-	} else {
+
+	if (ctx->block_used < 16) {
 		return written;
 	}
+
+	if (!nonblock) {
+		cbuf_wait_for_write(&ctx->buf);
+	}
+	if ((lock_err = pci_aes_lock(ctx->dev))) {
+		return lock_err;
+	}
+	pci_aes_set_mode(ctx->dev, ctx->mode);
+	pci_aes_set_key(ctx->dev, ctx->key);
+	pci_aes_next_block(ctx, ctx->block, 1, 0); // TODO remove this "1" parameter
+	kbuf += written;
+	count -= written;
+	ctx->block_used = 0;
+	
 
 	// Next process all remaining blocks. No blocking here is allowed -
 	// if we encounter possible blocking, we exit.
 	while (count >= 16) {
-		if (pci_aes_next_block(ctx, kbuf, 1) == -EWOULDBLOCK) {
+		if (!cbuf_has_space(&ctx->buf, 16)) {
+			pci_aes_unlock(ctx->dev);
 			return written;
 		}
+		pci_aes_next_block(ctx, kbuf, 1, 1);
 		count -= 16;
 		kbuf += 16;
 		written += 16;
 	}
-
+	pci_aes_unlock(ctx->dev);
 	// finally, copy the remainder to small block buffer
 	memcpy(ctx->block, kbuf, count);
+	ctx->block_used = count;
 	written += count;
 
 	return written;
@@ -195,8 +213,12 @@ int ctlcmd_to_mode_update_keys(struct aes_dev_context* ctx, unsigned int cmd, un
 				   copy_from_user(ctx->iv, iv->iv, 16) ? EINVAL :
 				OFB;
 		case AESDEV_IOCTL_SET_CTR:
-			return copy_to_user(state, ctx->iv, 16) ? EINVAL :
+			return copy_from_user(ctx->key, iv->key, 16) ||
+				   copy_from_user(ctx->iv, iv->iv, 16) ? EINVAL :
 				CTR;
+		case AESDEV_IOCTL_GET_STATE:
+			return copy_to_user(state, ctx->iv, 16) ? EINVAL :
+				GET_STATE;
 		default:
 			return -ENOTTY;
 	}
@@ -210,7 +232,7 @@ long aes_ioctl(struct file *filp,
 	if (new_mode < 0) {
 		return new_mode;
 	}
-	if (new_mode != AESDEV_IOCTL_SET_CTR) {
+	if (new_mode != AESDEV_IOCTL_GET_STATE) {
 		ctx->mode = new_mode;
 	}
 	return 0;
@@ -316,6 +338,7 @@ void aes_create_device(struct aes_dev* dev) {
 	if (aes_setup_cdev(dev, aes_nr_devs++)) {
 		return;
 	}
+	sema_init(&dev->mutex, 1);
 	dev->list.next = 0;
 	dev->list.prev = 0;
 	list_add_tail(&dev->list, &aes_devices);
