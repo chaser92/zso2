@@ -1,7 +1,7 @@
 #ifndef __AES_DEV_CONTEXT_H_
 #define __AES_DEV_CONTEXT_H_
 
-// #include <linux/pci.h>
+#include <linux/semaphore.h>
 
 #include "cyclic_buf.h"
 #include "aes_dev_context.h"
@@ -12,6 +12,7 @@ struct aes_dev_context {
 	struct cyclic_buf buf;
 	struct file* filp;
 	struct aes_dev* dev;
+	struct semaphore mutex;
 	int mode;
 	int block_used;
 	char block[16];

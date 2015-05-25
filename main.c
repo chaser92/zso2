@@ -1,19 +1,3 @@
-/*
- * main.c -- the bare aes char module
- *
- * Copyright (C) 2001 Alessandro Rubini and Jonathan Corbet
- * Copyright (C) 2001 O'Reilly & Associates
- *
- * The source code in this file can be freely used, adapted,
- * and redistributed in source or binary form, so long as an
- * acknowledgment appears in derived source files.  The citation
- * should list that the code comes from the book "Linux Device
- * Drivers" by Alessandro Rubini and Jonathan Corbet, published
- * by O'Reilly & Associates.   No warranty is attached;
- * we cannot take responsibility for errors or fitness for use.
- *
- */
-
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/init.h>
@@ -69,6 +53,7 @@ int aes_open(struct inode *inode, struct file *filp)
 	struct aes_dev_context* ctx = kmalloc(sizeof(struct aes_dev_context), GFP_KERNEL);
 	ctx->mode = MODE_NOT_SET;
 	ctx->block_used = 0;
+	sema_init(&ctx->mutex, 1);
 	if (!ctx) {
 		return -ENOMEM;
 	}
@@ -94,39 +79,78 @@ int aes_release(struct inode *inode, struct file *filp)
 ssize_t aes_read(struct file *filp, char __user *buf, size_t count,
                 loff_t *f_pos)
 {
+	int lock_err;
+	int result;
 	int nonblock = filp->f_flags & O_NONBLOCK;
 	int read;
 	struct aes_dev_context* ctx = filp->private_data;
 	char* kbuf = ctx->kbuf;
-	if (ctx->mode == MODE_NOT_SET) {
-		return -EINVAL;
-	}
-	if (nonblock) {
+
+	while (true) {
+		if ((lock_err = down_interruptible(&ctx->mutex))) {
+			return lock_err;	
+		}
+		if (ctx->mode == MODE_NOT_SET) {
+			up(&ctx->mutex);
+			return -EINVAL;
+		}
+			
 		read = cbuf_read_nonblock(&ctx->buf, kbuf, count > 4096 ? 4096 : count);
+		if (read == -EWOULDBLOCK) {
+			up(&ctx->mutex);
+			if (nonblock) {
+				return read;
+			} else {
+				if ((lock_err = cbuf_wait_for_read(&ctx->buf))) {
+					return lock_err;
+				}
+			}
+		} else {
+			break;
+		}
+	}
+		
+	if (read >= 0 && copy_to_user(buf, kbuf, read)) {
+		result = -ENOMEM;
 	} else {
-		read = cbuf_read(&ctx->buf, kbuf, count > 4096 ? 4096 : count);	
+		result = read;
 	}
-	if (read <= 0) {
-		return read;
-	}
-	if (copy_to_user(buf, kbuf, read)) {
-		return -ENOMEM;
-	}
-	return read;
+	up(&ctx->mutex);
+	return result;
 }
 
 ssize_t aes_write(struct file *filp, const char __user *buf, size_t count,
-                loff_t *f_pos)
-{
+                loff_t *f_pos) {
 	int nonblock = filp->f_flags & O_NONBLOCK;
 	int written = 0;
 	int lock_err;
 	struct aes_dev_context* ctx = filp->private_data;
 	char* kbuf = ctx->kbuf;
 
-	if (ctx->mode == MODE_NOT_SET) {
-		return -EINVAL;
+	// this is pure beauty
+	while (true) {
+		if ((lock_err = down_interruptible(&ctx->mutex))) {
+			return lock_err;	
+		}
+		if (ctx->mode == MODE_NOT_SET) {
+			up(&ctx->mutex);
+			return -EINVAL;
+		}
+
+		if (!cbuf_has_space(&ctx->buf, 16)) {
+			up(&ctx->mutex);
+			if (nonblock) {
+				return -EWOULDBLOCK;
+			} else {
+				if ((lock_err = cbuf_wait_for_write(&ctx->buf))) {
+					return lock_err;
+				}
+			}
+		} else {
+			break;
+		}
 	}
+
 	count = count > 4096 ? 4096 : count;
 	if (copy_from_user(kbuf, buf, count)) {
 		return -ENOMEM;
@@ -172,7 +196,7 @@ ssize_t aes_write(struct file *filp, const char __user *buf, size_t count,
 	memcpy(ctx->block, kbuf, count);
 	ctx->block_used = count;
 	written += count;
-
+	up(&ctx->mutex);
 	return written;
 }
 
@@ -222,6 +246,20 @@ int ctlcmd_to_mode_update_keys(struct aes_dev_context* ctx, unsigned int cmd, un
 		default:
 			return -ENOTTY;
 	}
+}
+
+long aes_ioctl_unsafe(struct file* filp, 
+	unsigned int cmd, unsigned long arg) {
+	int lock_err;
+	long result;
+	struct aes_dev_context* ctx = filp->private_data;
+
+	if ((lock_err = down_interruptible(&ctx->mutex))) {
+		return lock_err;	
+	}
+	result = aes_ioctl(filp, cmd, arg);
+	up(&ctx->mutex);
+	return result;
 }
 
 long aes_ioctl(struct file *filp,

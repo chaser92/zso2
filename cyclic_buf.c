@@ -48,13 +48,13 @@ int cbuf_write_nonblock(struct cyclic_buf* cb, void* buf, int length) {
 	return to_write;
 }
 
-int cbuf_read(struct cyclic_buf* cb, void* buf, int length) {
-	int n;
-	while ((n = cbuf_read_nonblock(cb, buf, length)) == -EWOULDBLOCK) {
-		if (down_interruptible(&cb->sem_read))
+int cbuf_wait_for_read(struct cyclic_buf* cb) {
+	while (cb->used == 0) {
+		if (down_interruptible(&cb->sem_read)) {
 			return -ERESTARTSYS;
+		}
 	}
-	return n;
+	return 0;
 }
 
 int cbuf_wait_for_write(struct cyclic_buf* cb) {
