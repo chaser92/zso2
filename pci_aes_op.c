@@ -1,5 +1,6 @@
 #include "pci_aes_op.h"
-#include "aes_dev.h"
+#include "aes_dev_context.h"
+#include "cyclic_buf.h"
 
 void pci_write16(void* __iomem dest, void* src) {
 	int i = 0;
@@ -25,12 +26,24 @@ void pci_aes_set_key(struct aes_dev* dev, void* key) {
 	pci_write16(buf_key, key);
 }
 
-void pci_aes_exec16(struct aes_dev* dev, void* meta, void* data) {
+void pci_aes_set_meta(struct aes_dev* dev, void* meta) {
 	void* __iomem buf_meta = dev->buf + AES_PCI_META_OFFSET;
-	void* __iomem buf_data = dev->buf + AES_PCI_DATA_OFFSET;
 	pci_write16(buf_meta, meta);
+}
+
+void pci_aes_exec16(struct aes_dev* dev, void* data) {
+	void* __iomem buf_data = dev->buf + AES_PCI_DATA_OFFSET;
 	pci_write16(buf_data, data);
 	pci_read16(buf_data, data);
+}
+
+int pci_aes_next_block(struct aes_dev_context* ctx, void* block, int nonblock) {
+	pci_aes_exec16(ctx->dev, block);
+	if (nonblock) {
+		return cbuf_write_nonblock(&ctx->buf, block, 16);
+	} else {
+		return cbuf_write(&ctx->buf, block, 16);
+	}
 }
 
 void pci_aes_set_mode(struct aes_dev* dev, int mode) {

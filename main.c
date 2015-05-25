@@ -32,6 +32,8 @@
 
 #include "aes.h"		/* local definitions */
 #include "pci_aes.h"
+#include "pci_aes_op.h"
+#include "aesdev_ioctl.h"
 #include "aes_dev_context.h"
 #include "cyclic_buf.h"
 /*
@@ -54,7 +56,6 @@ MODULE_LICENSE("Dual BSD/GPL");
 struct class *aes_class;
 
 LIST_HEAD(aes_devices);
-LIST_HEAD(aes_contexts);
 
 /*
  * Open and close
@@ -63,9 +64,10 @@ LIST_HEAD(aes_contexts);
 int aes_open(struct inode *inode, struct file *filp)
 {
 	int err;
-	//struct aes_dev *dev;
+	struct aes_dev *dev;
 	struct aes_dev_context* ctx = kmalloc(sizeof(struct aes_dev_context), GFP_KERNEL);
-	printk(KERN_NOTICE "Opening\n");
+	ctx->mode = MODE_NOT_SET;
+	ctx->block_used = 0;
 	if (!ctx) {
 		return -ENOMEM;
 	}
@@ -73,6 +75,7 @@ int aes_open(struct inode *inode, struct file *filp)
 	if ((err = cbuf_init(&ctx->buf, 4096))) {
 		return err;
 	}
+		printk(KERN_NOTICE "Opening %d\n", ctx->buf.buf);
     dev = container_of(inode->i_cdev, struct aes_dev, cdev);
 	ctx->dev = dev;
 	filp->private_data = ctx;
@@ -90,25 +93,127 @@ int aes_release(struct inode *inode, struct file *filp)
 ssize_t aes_read(struct file *filp, char __user *buf, size_t count,
                 loff_t *f_pos)
 {
-	// struct aes_dev_context* ctx = find_context_by_filp(filp);
+	int read;
+	char kbuf[4096];
+	struct aes_dev_context* ctx = filp->private_data;
 	
-	return 0;
+	if (ctx->mode == MODE_NOT_SET) {
+		return -EINVAL;
+	}
+	read = cbuf_read(&ctx->buf, kbuf, count > 4096 ? 4096 : count);
+	if (read <= 0) {
+		return read;
+	}
+	if (copy_to_user(buf, kbuf, read)) {
+		return -ENOMEM;
+	}
+	return read;
 }
 
 ssize_t aes_write(struct file *filp, const char __user *buf, size_t count,
                 loff_t *f_pos)
 {
-	return 0;
+	int written = 0;
+	char kbuf_arr[4096];
+	char* kbuf = kbuf_arr;
+	struct aes_dev_context* ctx = filp->private_data;
+
+	if (ctx->mode == MODE_NOT_SET) {
+		return -EINVAL;
+	}
+	count = count > 4096 ? 4096 : count;
+	if (copy_from_user(kbuf, buf, count)) {
+		return -ENOMEM;
+	}
+
+	// first copy at most 16 bytes to small block buffer
+	written = count > 16 - ctx->block_used ? 16 - ctx->block_used : count;
+	memcpy(ctx->block + ctx->block_used, kbuf, written);
+	ctx->block_used += written;
+	if (ctx->block_used == 16) {
+		pci_aes_set_key(ctx->dev, ctx->key);
+		pci_aes_set_meta(ctx->dev, ctx->iv);
+		pci_aes_next_block(ctx, ctx->block, 0);
+		kbuf += written;
+		count -= written;
+	} else {
+		return written;
+	}
+
+	// Next process all remaining blocks. No blocking here is allowed -
+	// if we encounter possible blocking, we exit.
+	while (count >= 16) {
+		if (pci_aes_next_block(ctx, kbuf, 1) == -EWOULDBLOCK) {
+			return written;
+		}
+		count -= 16;
+		kbuf += 16;
+		written += 16;
+	}
+
+	// finally, copy the remainder to small block buffer
+	memcpy(ctx->block, kbuf, count);
+	written += count;
+
+	return written;
 }
 
 /*
  * The ioctl() implementation
  */
 
+int ctlcmd_to_mode_update_keys(struct aes_dev_context* ctx, unsigned int cmd, unsigned long arg) {
+	struct aesdev_ioctl_set_ecb *ecb = (struct aesdev_ioctl_set_ecb *)arg;
+	struct aesdev_ioctl_set_iv *iv = (struct aesdev_ioctl_set_iv *)arg;
+	struct aesdev_ioctl_get_state *state = (struct aesdev_ioctl_get_state *)arg;
+
+	switch (cmd) {
+		case AESDEV_IOCTL_SET_ECB_ENCRYPT:
+			return copy_from_user(ctx->key, ecb->key, 16) ? EINVAL :
+				ECB_ENCRYPT;
+		case AESDEV_IOCTL_SET_ECB_DECRYPT:
+			return copy_from_user(ctx->key, ecb->key, 16) ? EINVAL :
+				ECB_DECRYPT;
+		case AESDEV_IOCTL_SET_CBC_ENCRYPT:
+			return copy_from_user(ctx->key, iv->key, 16) ||
+				   copy_from_user(ctx->iv, iv->iv, 16) ? EINVAL :
+				CBC_ENCRYPT;
+		case AESDEV_IOCTL_SET_CBC_DECRYPT:
+			return copy_from_user(ctx->key, iv->key, 16) ||
+				   copy_from_user(ctx->iv, iv->iv, 16) ? EINVAL :
+				CBC_DECRYPT;
+		case AESDEV_IOCTL_SET_CFB_ENCRYPT:
+			return copy_from_user(ctx->key, iv->key, 16) ||
+				   copy_from_user(ctx->iv, iv->iv, 16) ? EINVAL :
+				CFB_ENCRYPT;
+		case AESDEV_IOCTL_SET_CFB_DECRYPT:
+			return copy_from_user(ctx->key, iv->key, 16) ||
+				   copy_from_user(ctx->iv, iv->iv, 16) ? EINVAL :
+				CFB_DECRYPT;
+		case AESDEV_IOCTL_SET_OFB:
+			return copy_from_user(ctx->key, iv->key, 16) ||
+				   copy_from_user(ctx->iv, iv->iv, 16) ? EINVAL :
+				OFB;
+		case AESDEV_IOCTL_SET_CTR:
+			return copy_to_user(state, ctx->iv, 16) ? EINVAL :
+				CTR;
+		default:
+			return -ENOTTY;
+	}
+}
+
 long aes_ioctl(struct file *filp,
                  unsigned int cmd, unsigned long arg)
 {
-	return -ENOTTY;
+	struct aes_dev_context* ctx = filp->private_data;
+	int new_mode = ctlcmd_to_mode_update_keys(ctx, cmd, arg);
+	if (new_mode < 0) {
+		return new_mode;
+	}
+	if (new_mode != AESDEV_IOCTL_SET_CTR) {
+		ctx->mode = new_mode;
+	}
+	return 0;
 }
 
 
@@ -177,7 +282,7 @@ static int aes_setup_cdev(struct aes_dev *dev, int index)
 		return err;
 	}
 
-	dev->dev = device_create(aes_class, 0, dev->devno, 0, "myaes%d", index);
+	dev->dev = device_create(aes_class, 0, dev->devno, 0, "aes%d", index);
 	if (IS_ERR(dev->dev)) {
 		printk(KERN_NOTICE "Error %ld adding aes%d to sysfs\n", PTR_ERR(dev->dev), index);
 		dev->dev = 0;
@@ -191,7 +296,7 @@ static int aes_setup_cdev(struct aes_dev *dev, int index)
 int aes_initm_get_major(void) {
 	int result;
 	dev_t dev = MKDEV(AES_MAJOR, 0);
-	if ((result = alloc_chrdev_region(&dev, 0, 16, "myaes"))) {
+	if ((result = alloc_chrdev_region(&dev, 0, 16, "aes"))) {
 		printk(KERN_WARNING "aes: can't get major %d\n", aes_major);
 		return result;
 	}

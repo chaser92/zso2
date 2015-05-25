@@ -8,9 +8,10 @@
 #define AES_XFER_TASK_OFFSET 0x48
 
 #include <linux/compiler.h>
-#include "aes_dev.h"
+#include "aes_dev_context.h"
 
 enum aes_mode {
+	MODE_NOT_SET = -1,
 	ECB_ENCRYPT = 0,
 	ECB_DECRYPT = 1,
  	CBC_ENCRYPT = 2,
@@ -21,8 +22,10 @@ enum aes_mode {
 	CTR = 7
 };
 
-void pci_aes_exec16(struct aes_dev* dev, void* meta, void* data);
+void pci_aes_exec16(struct aes_dev* dev, void* data);
+void pci_aes_set_meta(struct aes_dev* dev, void* meta);
 void pci_aes_set_key(struct aes_dev* dev, void* key);
 void pci_aes_set_mode(struct aes_dev* dev, int mode);
+int pci_aes_next_block(struct aes_dev_context* ctx, void* block, int nonblock);
 
 #endif

@@ -9,7 +9,7 @@ int cbuf_init(struct cyclic_buf* cb, int length) {
 		return -ENOMEM;
 	}
 	sema_init(&cb->sem_read, 1);
-	sema_init(&cb->sem_write, 1);
+	sema_init(&cb->sem_write, 0);
 	cb->length = length;
 	cb->used = 0;
 	return 0;
@@ -57,8 +57,8 @@ int cbuf_read(struct cyclic_buf* cb, void* buf, int length) {
 
 int cbuf_write(struct cyclic_buf* cb, void* buf, int length) {
 	int n;
-	while ((n = cbuf_read_nonblock(cb, buf, length)) == -EWOULDBLOCK) {
-		if (down_interruptible(&cb->sem_read))
+	while ((n = cbuf_write_nonblock(cb, buf, length)) == -EWOULDBLOCK) {
+		if (down_interruptible(&cb->sem_write))
 			return -ERESTARTSYS;
 	}
 	return n;

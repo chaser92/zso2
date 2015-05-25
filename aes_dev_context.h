@@ -12,6 +12,11 @@ struct aes_dev_context {
 	struct cyclic_buf buf;
 	struct file* filp;
 	struct aes_dev* dev;
+	int mode;
+	int block_used;
+	char block[16];
+	char key[16];
+	char iv[16];
 };
 
 #endif
