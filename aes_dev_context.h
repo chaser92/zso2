@@ -6,6 +6,8 @@
 #include "cyclic_buf.h"
 #include "aes_dev_context.h"
 #include "aes_dev.h"
+#include "aesdev.h"
+#include "aes.h"
 
 struct aes_dev_context {
 	struct list_head list;
@@ -15,10 +17,10 @@ struct aes_dev_context {
 	struct semaphore mutex;
 	int mode;
 	int block_used;
-	char block[16];
-	char key[16];
-	char iv[16];
-	char kbuf[4096];
+	char block[AESDEV_AES_BLOCK_SIZE];
+	char key[AESDEV_AES_BLOCK_SIZE];
+	char iv[AESDEV_AES_BLOCK_SIZE];
+	char kbuf[CBUF_SIZE];
 };
 
 #endif

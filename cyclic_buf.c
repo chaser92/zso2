@@ -2,6 +2,7 @@
 
 #include <linux/errno.h>
 #include <linux/slab.h>
+#include "aesdev.h"
 
 int cbuf_init(struct cyclic_buf* cb, int length) {
 	cb->buf = kmalloc(length, GFP_KERNEL);
@@ -28,7 +29,7 @@ int cbuf_read_nonblock(struct cyclic_buf* cb, void* buf, int length) {
 	memcpy(buf, cb->buf, to_read);
 	memmove(cb->buf, cb->buf + to_read, cb->used - to_read);
 	cb->used -= to_read;
-	if (cbuf_has_space(cb, 16)) {
+	if (cbuf_has_space(cb, AESDEV_AES_BLOCK_SIZE)) {
 		up(&cb->sem_write);
 	}
 	return to_read;
@@ -58,7 +59,7 @@ int cbuf_wait_for_read(struct cyclic_buf* cb) {
 }
 
 int cbuf_wait_for_write(struct cyclic_buf* cb) {
-	while (!cbuf_has_space(cb, 16)) {
+	while (!cbuf_has_space(cb, AESDEV_AES_BLOCK_SIZE)) {
 		if (down_interruptible(&cb->sem_write)) {
 			return -ERESTARTSYS;
 		}

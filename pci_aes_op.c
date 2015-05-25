@@ -1,12 +1,12 @@
 #include "pci_aes_op.h"
 #include "aes_dev_context.h"
 #include "cyclic_buf.h"
+#include "aesdev.h"
 
 void pci_write16(void* __iomem dest, void* src) {
 	int i = 0;
 	u8* src32 = src;
-	for (i=0; i<16; i++) {
-		// printk("Writing %d %d\n", src32[i], dest);
+	for (i = 0; i < AESDEV_AES_BLOCK_SIZE; i++) {
 		iowrite8(src32[i], dest);
 		dest++;
 	}
@@ -15,21 +15,20 @@ void pci_write16(void* __iomem dest, void* src) {
 void pci_read16(void* __iomem src, void* dest) {
 	int i = 0;
 	u8* dest32 = dest;
-	for (i=0; i<16; i++) {
+	for (i = 0; i < AESDEV_AES_BLOCK_SIZE; i++) {
 		dest32[i] = ioread8(src);
-		// printk("Reading %d %d\n", dest32[i], src);
 		src++;
 	}
 }
 
 void pci_aes_set_key(struct aes_dev* dev, void* key) {
-	void* __iomem buf_key = dev->buf + AES_PCI_KEY_OFFSET;
+	void* __iomem buf_key = dev->buf + AESDEV_AES_KEY(0);
 	pci_write16(buf_key, key);
 }
 
 void pci_aes_exec16(struct aes_dev* dev, void* iv, void* data) {
-	void* __iomem buf_iv = dev->buf + AES_PCI_META_OFFSET;
-	void* __iomem buf_data = dev->buf + AES_PCI_DATA_OFFSET;
+	void* __iomem buf_iv = dev->buf + AESDEV_AES_STATE(0);
+	void* __iomem buf_data = dev->buf + AESDEV_AES_DATA(0);
 	if (iv) {
 		pci_write16(buf_iv, iv);
 	}
@@ -40,20 +39,14 @@ void pci_aes_exec16(struct aes_dev* dev, void* iv, void* data) {
 	}
 }
 
-int pci_aes_next_block(struct aes_dev_context* ctx, void* block, int nonblock, int skip_iv) {
-	int err;
+int pci_aes_next_block(struct aes_dev_context* ctx, void* block, int skip_iv) {
 	pci_aes_exec16(ctx->dev, ctx->iv, block);
-	if (!nonblock) {
-		if ((err = cbuf_wait_for_write(&ctx->buf))) {
-			return err;
-		}
-	} 
-	return cbuf_write_nonblock(&ctx->buf, block, 16);
+	return cbuf_write_nonblock(&ctx->buf, block, AESDEV_AES_BLOCK_SIZE);
 }
 
 void pci_aes_set_mode(struct aes_dev* dev, int mode) {
 	// printk(KERN_NOTICE "Setting mode %d\n", mode);
-	void* __iomem buf_mode = dev->buf + AES_XFER_TASK_OFFSET;
+	void* __iomem buf_mode = dev->buf + AESDEV_XFER_TASK;
 	iowrite32(mode, buf_mode);
 }
 

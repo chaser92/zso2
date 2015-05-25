@@ -1,0 +1,5 @@
+Napisany przeze mnie moduł obsługuje tylko tryb MMIO urządzenia AES. Do zaimplementowania tego użyłem linuksowego API sterowników znakowych, jako punkt startowy wziąłem przykładowy program scull.
+
+Dla każdego dostępnego urządzenia PCI tworzę plik znakowy związany z tym urządzeniem. Każdemu otwarciu jednego z takich plików przypisuję indywidualny obiekt reprezentujący jego kontekst, który pamięta stan, w jakim urządzenie się znajdowało pomiędzy wywołaniami funkcji write. Dzięki temu można obsługiwać w sposób niezależny kilku użytkowników jednego urządzenia, synchronizując jedynie dostęp do urządzenia. Kontekst przechowuje również przetworzone dane gotowe do pobrania - w razie zapełnienia/opróżnienia bufora blokuje zapis/odczyt do momentu zmiany tego warunku.
+
+Ponadto, każda operacja zapisu i odczytu jest chroniona mutexem, dzięki czemu odczyt i zapis nie wymaga synchronizacji ze strony użytkownika. 

@@ -1,7 +1,8 @@
+// Autor: Mariusz Kierski
+
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/init.h>
-
 #include <linux/kernel.h>	/* printk() */
 #include <linux/slab.h>		/* kmalloc() */
 #include <linux/fs.h>		/* everything... */
@@ -18,6 +19,7 @@
 #include "pci_aes.h"
 #include "pci_aes_op.h"
 #include "aesdev_ioctl.h"
+#include "aesdev.h"
 #include "aes_dev_context.h"
 #include "cyclic_buf.h"
 /*
@@ -30,13 +32,8 @@ int aes_major =   AES_MAJOR;
 int aes_minor =   0;
 int aes_nr_devs = 0;	/* number of bare aes devices */
 
-
-//module_param(aes_major, int, S_IRUGO);
-//module_param(aes_minor, int, S_IRUGO);
-//module_param(aes_nr_devs, int, S_IRUGO);
-
-MODULE_AUTHOR("Alessandro Rubini, Jonathan Corbet");
-MODULE_LICENSE("Dual BSD/GPL");
+MODULE_AUTHOR("Mariusz Kierski");
+MODULE_LICENSE("GPL");
 
 struct class *aes_class;
 
@@ -58,7 +55,7 @@ int aes_open(struct inode *inode, struct file *filp)
 		return -ENOMEM;
 	}
 	ctx->filp = filp;
-	if ((err = cbuf_init(&ctx->buf, 4096))) {
+	if ((err = cbuf_init(&ctx->buf, CBUF_SIZE))) {
 		return err;
 	}
 
@@ -95,7 +92,7 @@ ssize_t aes_read(struct file *filp, char __user *buf, size_t count,
 			return -EINVAL;
 		}
 			
-		read = cbuf_read_nonblock(&ctx->buf, kbuf, count > 4096 ? 4096 : count);
+		read = cbuf_read_nonblock(&ctx->buf, kbuf, count > CBUF_SIZE ? CBUF_SIZE : count);
 		if (read == -EWOULDBLOCK) {
 			up(&ctx->mutex);
 			if (nonblock) {
@@ -127,7 +124,7 @@ ssize_t aes_write(struct file *filp, const char __user *buf, size_t count,
 	struct aes_dev_context* ctx = filp->private_data;
 	char* kbuf = ctx->kbuf;
 
-	// this is pure beauty
+	// this loop is pure beauty
 	while (true) {
 		if ((lock_err = down_interruptible(&ctx->mutex))) {
 			return lock_err;	
@@ -137,7 +134,7 @@ ssize_t aes_write(struct file *filp, const char __user *buf, size_t count,
 			return -EINVAL;
 		}
 
-		if (!cbuf_has_space(&ctx->buf, 16)) {
+		if (!cbuf_has_space(&ctx->buf, AESDEV_AES_BLOCK_SIZE)) {
 			up(&ctx->mutex);
 			if (nonblock) {
 				return -EWOULDBLOCK;
@@ -151,17 +148,18 @@ ssize_t aes_write(struct file *filp, const char __user *buf, size_t count,
 		}
 	}
 
-	count = count > 4096 ? 4096 : count;
+	count = count > CBUF_SIZE ? CBUF_SIZE : count;
 	if (copy_from_user(kbuf, buf, count)) {
 		return -ENOMEM;
 	}
 
-	// first copy at most 16 bytes to small block buffer
-	written = count > 16 - ctx->block_used ? 16 - ctx->block_used : count;
+	// first copy at most AESDEV_AES_BLOCK_SIZE bytes to small block buffer
+	written = count > AESDEV_AES_BLOCK_SIZE - ctx->block_used ? AESDEV_AES_BLOCK_SIZE - ctx->block_used : count;
 	memcpy(ctx->block + ctx->block_used, kbuf, written);
 	ctx->block_used += written;
 
-	if (ctx->block_used < 16) {
+	if (ctx->block_used < AESDEV_AES_BLOCK_SIZE) {
+		up(&ctx->mutex);
 		return written;
 	}
 
@@ -169,11 +167,12 @@ ssize_t aes_write(struct file *filp, const char __user *buf, size_t count,
 		cbuf_wait_for_write(&ctx->buf);
 	}
 	if ((lock_err = pci_aes_lock(ctx->dev))) {
+		up(&ctx->mutex);
 		return lock_err;
 	}
 	pci_aes_set_mode(ctx->dev, ctx->mode);
 	pci_aes_set_key(ctx->dev, ctx->key);
-	pci_aes_next_block(ctx, ctx->block, 1, 0); // TODO remove this "1" parameter
+	pci_aes_next_block(ctx, ctx->block, USE_IV); // TODO remove this "1" parameter
 	kbuf += written;
 	count -= written;
 	ctx->block_used = 0;
@@ -181,17 +180,19 @@ ssize_t aes_write(struct file *filp, const char __user *buf, size_t count,
 
 	// Next process all remaining blocks. No blocking here is allowed -
 	// if we encounter possible blocking, we exit.
-	while (count >= 16) {
-		if (!cbuf_has_space(&ctx->buf, 16)) {
+	while (count >= AESDEV_AES_BLOCK_SIZE) {
+		if (!cbuf_has_space(&ctx->buf, AESDEV_AES_BLOCK_SIZE)) {
 			pci_aes_unlock(ctx->dev);
+			up(&ctx->mutex);
 			return written;
 		}
-		pci_aes_next_block(ctx, kbuf, 1, 1);
-		count -= 16;
-		kbuf += 16;
-		written += 16;
+		pci_aes_next_block(ctx, kbuf, SKIP_IV);
+		count -= AESDEV_AES_BLOCK_SIZE;
+		kbuf += AESDEV_AES_BLOCK_SIZE;
+		written += AESDEV_AES_BLOCK_SIZE;
 	}
 	pci_aes_unlock(ctx->dev);
+
 	// finally, copy the remainder to small block buffer
 	memcpy(ctx->block, kbuf, count);
 	ctx->block_used = count;
@@ -211,38 +212,38 @@ int ctlcmd_to_mode_update_keys(struct aes_dev_context* ctx, unsigned int cmd, un
 
 	switch (cmd) {
 		case AESDEV_IOCTL_SET_ECB_ENCRYPT:
-			return copy_from_user(ctx->key, ecb->key, 16) ? EINVAL :
-				ECB_ENCRYPT;
+			return copy_from_user(ctx->key, ecb->key, AESDEV_AES_BLOCK_SIZE) ? EINVAL :
+				AESDEV_MODE_ECB_ENCRYPT;
 		case AESDEV_IOCTL_SET_ECB_DECRYPT:
-			return copy_from_user(ctx->key, ecb->key, 16) ? EINVAL :
-				ECB_DECRYPT;
+			return copy_from_user(ctx->key, ecb->key, AESDEV_AES_BLOCK_SIZE) ? EINVAL :
+				AESDEV_MODE_ECB_DECRYPT;
 		case AESDEV_IOCTL_SET_CBC_ENCRYPT:
-			return copy_from_user(ctx->key, iv->key, 16) ||
-				   copy_from_user(ctx->iv, iv->iv, 16) ? EINVAL :
-				CBC_ENCRYPT;
+			return copy_from_user(ctx->key, iv->key, AESDEV_AES_BLOCK_SIZE) ||
+				   copy_from_user(ctx->iv, iv->iv, AESDEV_AES_BLOCK_SIZE) ? EINVAL :
+				AESDEV_MODE_CBC_ENCRYPT;
 		case AESDEV_IOCTL_SET_CBC_DECRYPT:
-			return copy_from_user(ctx->key, iv->key, 16) ||
-				   copy_from_user(ctx->iv, iv->iv, 16) ? EINVAL :
-				CBC_DECRYPT;
+			return copy_from_user(ctx->key, iv->key, AESDEV_AES_BLOCK_SIZE) ||
+				   copy_from_user(ctx->iv, iv->iv, AESDEV_AES_BLOCK_SIZE) ? EINVAL :
+				AESDEV_MODE_CBC_DECRYPT;
 		case AESDEV_IOCTL_SET_CFB_ENCRYPT:
-			return copy_from_user(ctx->key, iv->key, 16) ||
-				   copy_from_user(ctx->iv, iv->iv, 16) ? EINVAL :
-				CFB_ENCRYPT;
+			return copy_from_user(ctx->key, iv->key, AESDEV_AES_BLOCK_SIZE) ||
+				   copy_from_user(ctx->iv, iv->iv, AESDEV_AES_BLOCK_SIZE) ? EINVAL :
+				AESDEV_MODE_CFB_ENCRYPT;
 		case AESDEV_IOCTL_SET_CFB_DECRYPT:
-			return copy_from_user(ctx->key, iv->key, 16) ||
-				   copy_from_user(ctx->iv, iv->iv, 16) ? EINVAL :
-				CFB_DECRYPT;
+			return copy_from_user(ctx->key, iv->key, AESDEV_AES_BLOCK_SIZE) ||
+				   copy_from_user(ctx->iv, iv->iv, AESDEV_AES_BLOCK_SIZE) ? EINVAL :
+				AESDEV_MODE_CFB_DECRYPT;
 		case AESDEV_IOCTL_SET_OFB:
-			return copy_from_user(ctx->key, iv->key, 16) ||
-				   copy_from_user(ctx->iv, iv->iv, 16) ? EINVAL :
-				OFB;
+			return copy_from_user(ctx->key, iv->key, AESDEV_AES_BLOCK_SIZE) ||
+				   copy_from_user(ctx->iv, iv->iv, AESDEV_AES_BLOCK_SIZE) ? EINVAL :
+				AESDEV_MODE_OFB;
 		case AESDEV_IOCTL_SET_CTR:
-			return copy_from_user(ctx->key, iv->key, 16) ||
-				   copy_from_user(ctx->iv, iv->iv, 16) ? EINVAL :
-				CTR;
+			return copy_from_user(ctx->key, iv->key, AESDEV_AES_BLOCK_SIZE) ||
+				   copy_from_user(ctx->iv, iv->iv, AESDEV_AES_BLOCK_SIZE) ? EINVAL :
+				AESDEV_MODE_CTR;
 		case AESDEV_IOCTL_GET_STATE:
-			return copy_to_user(state, ctx->iv, 16) ? EINVAL :
-				GET_STATE;
+			return copy_to_user(state, ctx->iv, AESDEV_AES_BLOCK_SIZE) ? EINVAL :
+				AESDEV_COMMAND_GET_STATE;
 		default:
 			return -ENOTTY;
 	}
@@ -287,15 +288,7 @@ struct file_operations aes_fops = {
 	.release =  		aes_release,
 };
 
-/*
- * Finally, the module stuff
- */
 
-/*
- * The cleanup function is used to handle initialization failures as well.
- * Thefore, it must be careful to work correctly even if some of the items
- * have not been initialized
- */
 void aes_cleanup_module(void)
 {
 	struct list_head* entry;
@@ -318,7 +311,7 @@ void aes_cleanup_module(void)
 	}
 
 	/* cleanup_module is never called if registering failed */
-	unregister_chrdev_region(devno, 16); // TODO
+	unregister_chrdev_region(devno, AES_NUM_DEVICES); 
 
 	class_destroy(aes_class);
 }
@@ -345,7 +338,7 @@ static int aes_setup_cdev(struct aes_dev *dev, int index)
 	dev->dev = device_create(aes_class, 0, dev->devno, 0, "aes%d", index);
 	if (IS_ERR(dev->dev)) {
 		printk(KERN_NOTICE "Error %ld adding aes%d to sysfs\n", PTR_ERR(dev->dev), index);
-		dev->dev = 0;
+		dev->dev = NULL;
 		return 1;
 	} else {
 		printk(KERN_NOTICE "Device successfully added!!!!\n");
@@ -356,7 +349,7 @@ static int aes_setup_cdev(struct aes_dev *dev, int index)
 int aes_initm_get_major(void) {
 	int result;
 	dev_t dev = MKDEV(AES_MAJOR, 0);
-	if ((result = alloc_chrdev_region(&dev, 0, 16, "aes"))) {
+	if ((result = alloc_chrdev_region(&dev, 0, AES_NUM_DEVICES, "aes"))) {
 		printk(KERN_WARNING "aes: can't get major %d\n", aes_major);
 		return result;
 	}
@@ -365,7 +358,7 @@ int aes_initm_get_major(void) {
 }
 
 int aes_initm_create_class(void) {
-	aes_class = class_create(THIS_MODULE, "myaes");
+	aes_class = class_create(THIS_MODULE, "aes");
 	if (IS_ERR(aes_class)) {
 		return PTR_ERR(aes_class);
 	}
@@ -387,14 +380,13 @@ int aes_init_module(void)
 
 	int result;
 	
-	printk(KERN_WARNING "AES IS UP!\n");
 	if ((result = aes_initm_get_major() ||
-				  aes_initm_create_class())) {
+				  aes_initm_create_class() ||
+				  pci_aes_init(aes_create_device))) {
 		printk(KERN_WARNING "AES was not initialized.");
 		aes_cleanup_module();
 		return result;
 	}
-	pci_aes_init(aes_create_device);
 
 	return 0; /* succeed */
 }
