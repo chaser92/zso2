@@ -43,8 +43,7 @@ LIST_HEAD(aes_devices);
  * Open and close
  */
 
-int aes_open(struct inode *inode, struct file *filp)
-{
+int aes_open(struct inode *inode, struct file *filp) {
 	int err;
 	struct aes_dev *dev;
 	struct aes_dev_context* ctx = kmalloc(sizeof(struct aes_dev_context), GFP_KERNEL);
@@ -65,8 +64,7 @@ int aes_open(struct inode *inode, struct file *filp)
 	return 0;          /* success */
 }
 
-int aes_release(struct inode *inode, struct file *filp)
-{
+int aes_release(struct inode *inode, struct file *filp) {
 	struct aes_dev_context* ctx = filp->private_data;
 	cbuf_destroy(&ctx->buf);
 	kfree(ctx);
@@ -96,7 +94,7 @@ ssize_t aes_read(struct file *filp, char __user *buf, size_t count,
 		if (read == -EWOULDBLOCK) {
 			up(&ctx->mutex);
 			if (nonblock) {
-				return read;
+				return -EAGAIN;
 			} else {
 				if ((lock_err = cbuf_wait_for_read(&ctx->buf))) {
 					return lock_err;
@@ -133,11 +131,10 @@ ssize_t aes_write(struct file *filp, const char __user *buf, size_t count,
 			up(&ctx->mutex);
 			return -EINVAL;
 		}
-
 		if (!cbuf_has_space(&ctx->buf, AESDEV_AES_BLOCK_SIZE)) {
 			up(&ctx->mutex);
 			if (nonblock) {
-				return -EWOULDBLOCK;
+				return -EAGAIN;
 			} else {
 				if ((lock_err = cbuf_wait_for_write(&ctx->buf))) {
 					return lock_err;
@@ -150,6 +147,7 @@ ssize_t aes_write(struct file *filp, const char __user *buf, size_t count,
 
 	count = count > CBUF_SIZE ? CBUF_SIZE : count;
 	if (copy_from_user(kbuf, buf, count)) {
+		up(&ctx->mutex);
 		return -ENOMEM;
 	}
 
@@ -163,16 +161,13 @@ ssize_t aes_write(struct file *filp, const char __user *buf, size_t count,
 		return written;
 	}
 
-	if (!nonblock) {
-		cbuf_wait_for_write(&ctx->buf);
-	}
 	if ((lock_err = pci_aes_lock(ctx->dev))) {
 		up(&ctx->mutex);
 		return lock_err;
 	}
 	pci_aes_set_mode(ctx->dev, ctx->mode);
 	pci_aes_set_key(ctx->dev, ctx->key);
-	pci_aes_next_block(ctx, ctx->block, USE_IV); // TODO remove this "1" parameter
+	pci_aes_next_block(ctx, ctx->block, USE_IV);
 	kbuf += written;
 	count -= written;
 	ctx->block_used = 0;
@@ -212,37 +207,37 @@ int ctlcmd_to_mode_update_keys(struct aes_dev_context* ctx, unsigned int cmd, un
 
 	switch (cmd) {
 		case AESDEV_IOCTL_SET_ECB_ENCRYPT:
-			return copy_from_user(ctx->key, ecb->key, AESDEV_AES_BLOCK_SIZE) ? EINVAL :
+			return copy_from_user(ctx->key, ecb->key, AESDEV_AES_BLOCK_SIZE) ? -EINVAL :
 				AESDEV_MODE_ECB_ENCRYPT;
 		case AESDEV_IOCTL_SET_ECB_DECRYPT:
-			return copy_from_user(ctx->key, ecb->key, AESDEV_AES_BLOCK_SIZE) ? EINVAL :
+			return copy_from_user(ctx->key, ecb->key, AESDEV_AES_BLOCK_SIZE) ? -EINVAL :
 				AESDEV_MODE_ECB_DECRYPT;
 		case AESDEV_IOCTL_SET_CBC_ENCRYPT:
 			return copy_from_user(ctx->key, iv->key, AESDEV_AES_BLOCK_SIZE) ||
-				   copy_from_user(ctx->iv, iv->iv, AESDEV_AES_BLOCK_SIZE) ? EINVAL :
+				   copy_from_user(ctx->iv, iv->iv, AESDEV_AES_BLOCK_SIZE) ? -EINVAL :
 				AESDEV_MODE_CBC_ENCRYPT;
 		case AESDEV_IOCTL_SET_CBC_DECRYPT:
 			return copy_from_user(ctx->key, iv->key, AESDEV_AES_BLOCK_SIZE) ||
-				   copy_from_user(ctx->iv, iv->iv, AESDEV_AES_BLOCK_SIZE) ? EINVAL :
+				   copy_from_user(ctx->iv, iv->iv, AESDEV_AES_BLOCK_SIZE) ? -EINVAL :
 				AESDEV_MODE_CBC_DECRYPT;
 		case AESDEV_IOCTL_SET_CFB_ENCRYPT:
 			return copy_from_user(ctx->key, iv->key, AESDEV_AES_BLOCK_SIZE) ||
-				   copy_from_user(ctx->iv, iv->iv, AESDEV_AES_BLOCK_SIZE) ? EINVAL :
+				   copy_from_user(ctx->iv, iv->iv, AESDEV_AES_BLOCK_SIZE) ? -EINVAL :
 				AESDEV_MODE_CFB_ENCRYPT;
 		case AESDEV_IOCTL_SET_CFB_DECRYPT:
 			return copy_from_user(ctx->key, iv->key, AESDEV_AES_BLOCK_SIZE) ||
-				   copy_from_user(ctx->iv, iv->iv, AESDEV_AES_BLOCK_SIZE) ? EINVAL :
+				   copy_from_user(ctx->iv, iv->iv, AESDEV_AES_BLOCK_SIZE) ? -EINVAL :
 				AESDEV_MODE_CFB_DECRYPT;
 		case AESDEV_IOCTL_SET_OFB:
 			return copy_from_user(ctx->key, iv->key, AESDEV_AES_BLOCK_SIZE) ||
-				   copy_from_user(ctx->iv, iv->iv, AESDEV_AES_BLOCK_SIZE) ? EINVAL :
+				   copy_from_user(ctx->iv, iv->iv, AESDEV_AES_BLOCK_SIZE) ? -EINVAL :
 				AESDEV_MODE_OFB;
 		case AESDEV_IOCTL_SET_CTR:
 			return copy_from_user(ctx->key, iv->key, AESDEV_AES_BLOCK_SIZE) ||
-				   copy_from_user(ctx->iv, iv->iv, AESDEV_AES_BLOCK_SIZE) ? EINVAL :
+				   copy_from_user(ctx->iv, iv->iv, AESDEV_AES_BLOCK_SIZE) ? -EINVAL :
 				AESDEV_MODE_CTR;
 		case AESDEV_IOCTL_GET_STATE:
-			return copy_to_user(state, ctx->iv, AESDEV_AES_BLOCK_SIZE) ? EINVAL :
+			return copy_to_user(state, ctx->iv, AESDEV_AES_BLOCK_SIZE) ? -EINVAL :
 				AESDEV_COMMAND_GET_STATE;
 		default:
 			return -ENOTTY;
@@ -264,8 +259,7 @@ long aes_ioctl_unsafe(struct file* filp,
 }
 
 long aes_ioctl(struct file *filp,
-                 unsigned int cmd, unsigned long arg)
-{
+                 unsigned int cmd, unsigned long arg) {
 	struct aes_dev_context* ctx = filp->private_data;
 	int new_mode = ctlcmd_to_mode_update_keys(ctx, cmd, arg);
 	if (new_mode < 0) {
@@ -289,14 +283,11 @@ struct file_operations aes_fops = {
 };
 
 
-void aes_cleanup_module(void)
-{
+void aes_cleanup_module(void) {
 	struct list_head* entry;
 	struct list_head* next;
 	struct aes_dev* dev;
 	dev_t devno = MKDEV(aes_major, aes_minor);
-
-	printk(KERN_NOTICE "Cleaning up...\n");
 
 	pci_aes_deinit();
 
@@ -320,8 +311,7 @@ void aes_cleanup_module(void)
 /*
  * Set up the char_dev structure for this device.
  */
-static int aes_setup_cdev(struct aes_dev *dev, int index)
-{
+static int aes_setup_cdev(struct aes_dev *dev, int index) {
 	int err;
        
 	dev->devno = MKDEV(aes_major, aes_minor + index);
@@ -331,7 +321,7 @@ static int aes_setup_cdev(struct aes_dev *dev, int index)
 	err = cdev_add(&dev->cdev, dev->devno, 1);
 	/* Fail gracefully if need be */
 	if (err) {
-		printk(KERN_NOTICE "Error %d adding aes%d", err, index);
+		printk(KERN_NOTICE "Error %d adding aes%d\n", err, index);
 		return err;
 	}
 
@@ -341,7 +331,6 @@ static int aes_setup_cdev(struct aes_dev *dev, int index)
 		dev->dev = NULL;
 		return 1;
 	} else {
-		printk(KERN_NOTICE "Device successfully added!!!!\n");
 		return 0;
 	}
 }
@@ -375,8 +364,7 @@ void aes_create_device(struct aes_dev* dev) {
 	list_add_tail(&dev->list, &aes_devices);
 }
 
-int aes_init_module(void)
-{
+int aes_init_module(void) {
 
 	int result;
 	

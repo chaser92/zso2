@@ -60,6 +60,5 @@ int pci_aes_init(void (*_device_created)(struct aes_dev* dev)) {
 }
 
 void pci_aes_deinit() {
-	printk(KERN_NOTICE "Unregistering PCI driver...\n");
 	pci_unregister_driver(&aespci);
 }

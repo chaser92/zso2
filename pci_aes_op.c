@@ -45,7 +45,6 @@ int pci_aes_next_block(struct aes_dev_context* ctx, void* block, int skip_iv) {
 }
 
 void pci_aes_set_mode(struct aes_dev* dev, int mode) {
-	// printk(KERN_NOTICE "Setting mode %d\n", mode);
 	void* __iomem buf_mode = dev->buf + AESDEV_XFER_TASK;
 	iowrite32(mode, buf_mode);
 }

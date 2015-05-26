@@ -1,14 +1,13 @@
-
 #ifndef _AES_H_
 #define _AES_H_
 
 #define MODE_NOT_SET -1
-#define CBUF_SIZE 4096
+#define CBUF_SIZE 32768
 #define AES_NUM_DEVICES 16
 #define AESDEV_COMMAND_GET_STATE 8
 
 extern struct class *aes_class;
-extern int aes_major;     /* main.c */
+extern int aes_major;
 extern int aes_nr_devs;
 
 ssize_t aes_read(struct file *filp, char __user *buf, size_t count,
